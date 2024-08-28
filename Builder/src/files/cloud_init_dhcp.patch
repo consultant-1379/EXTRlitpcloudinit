@@ -1,0 +1,28 @@
+--- cloud-init/trunk/cloudinit/distros/net_util.py	2015-02-09 13:04:34.000000000 +0000
++++ /tmp/net_util.py	2015-09-29 09:45:49.010512808 +0100
+@@ -127,12 +127,6 @@
+             continue
+         iface_info = {}
+         iface_info['ipv6'] = {}
+-        if len(iface_details) >= 3:
+-            proto_type = iface_details[2].strip().lower()
+-            # Seems like this can be 'loopback' which we don't
+-            # really care about
+-            if proto_type in ['dhcp', 'static']:
+-                iface_info['bootproto'] = proto_type
+         # These can just be copied over
+         if use_ipv6:
+             for k in ['address', 'gateway']:
+@@ -141,6 +135,12 @@
+                     if val:
+                         iface_info['ipv6'][k] = val
+         else:
++            if len(iface_details) >= 3:
++                proto_type = iface_details[2].strip().lower()
++                # Seems like this can be 'loopback' which we don't
++                # really care about
++                if proto_type in ['dhcp', 'static']:
++                    iface_info['bootproto'] = proto_type
+             for k in ['netmask', 'address', 'gateway', 'broadcast']:
+                 if k in info:
+                     val = info[k].strip().lower()

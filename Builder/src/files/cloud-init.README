@@ -1,0 +1,9 @@
+This cloud-init module is build using revision 1053 as a baseline
+https://arm1s11-eiffel004.eiffel.gic.ericsson.se:8443/nexus/content/repositories/litp_thirdparty/net/launchpad/cloud-init/1053/
+
+See also: http://bazaar.launchpad.net/~timbyr/cloud-init/cloud-init/revision/1053
+
+A patch has been applied to netinfo.py to allow IPv6 addresses to be configured correctly. A number of dependencies have also been removed to reduce FOSS requirements
+
+The rpmbuild spec file is based on the red-hat spec from the source rpm for revision 0.7.4-2
+

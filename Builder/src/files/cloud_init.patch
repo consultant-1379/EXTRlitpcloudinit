@@ -1,0 +1,1222 @@
+diff -uNr cloud-init/trunk/cloudinit/netinfo.py /tmp/cloud_init_1035_patched/cloud-init/trunk/cloudinit/netinfo.py
+--- cloud-init/trunk/cloudinit/netinfo.py	2015-02-09 13:04:34.000000000 +0000
++++ /tmp/cloud_init_1035_patched/cloud-init/trunk/cloudinit/netinfo.py	2015-08-27 11:23:23.952605641 +0100
+@@ -20,6 +20,8 @@
+ #    You should have received a copy of the GNU General Public License
+ #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ 
++import platform
++
+ import cloudinit.util as util
+ from cloudinit.log import logging
+ import re
+@@ -96,67 +98,86 @@
+ 
+ 
+ def route_info():
+-    (route_out, _err) = util.subp(["netstat", "-rn"])
++    routes = {'ipv4': [], 'ipv6': []}
+ 
+-    routes = {}
+-    routes['ipv4'] = []
+-    routes['ipv6'] = []
+-
+-    entries = route_out.splitlines()[1:]
+-    for line in entries:
+-        if not line:
+-            continue
+-        toks = line.split()
+-        # FreeBSD shows 6 items in the routing table:
++    if platform.system() == "FreeBSD":
++        route_out, _ = util.subp(["netstat", "-rnf", "inet"])
++
++        entries = [line for line in route_out.splitlines()[5:] if line]
++        for line in entries:
++            toks = line.split()
++        # FreeBSD "netstat -rnf inet" shows routing table as:
+         #  Destination  Gateway    Flags Refs    Use  Netif Expire
+         #  default      10.65.0.1  UGS      0  34920 vtnet0
+-        #
+-        # Linux netstat shows 2 more:
+-        #  Destination  Gateway    Genmask  Flags MSS Window irtt Iface
+-        #  0.0.0.0      10.65.0.1  0.0.0.0  UG      0 0         0 eth0
+-        if (len(toks) < 6 or toks[0] == "Kernel" or
+-                toks[0] == "Destination" or toks[0] == "Internet" or
+-                toks[0] == "Internet6" or toks[0] == "Routing"):
+-            continue
+-        if len(toks) < 8:
+-            toks.append("-")
+-            toks.append("-")
+-            toks[7] = toks[5]
+-            toks[5] = "-"
+-        entry = {
+-            'destination': toks[0],
+-            'gateway': toks[1],
+-            'genmask': toks[2],
+-            'flags': toks[3],
+-            'metric': toks[4],
+-            'ref': toks[5],
+-            'use': toks[6],
+-            'iface': toks[7],
+-        }
+-        routes['ipv4'].append(entry)
+ 
++            routes['ipv4'].append({
++                'destination': toks[0],
++                'gateway': toks[1],
++                'genmask': "",
++                'flags': toks[2],
++                'metric': "",
++                'ref': toks[3],
++                'use': toks[4],
++                'iface': toks[5],
++            })
++
++    if platform.system() == "Linux":
++        route_out, _ = util.subp(["netstat", "-renA", "inet"])
++        entries = [line for line in route_out.splitlines()[3:] if line]
++        for line in entries:
++            toks = line.split()
++
++        # Linux "netstat -renA inet" shows routing table as:
++        #  Destination  Gateway    Genmask  Flags Metric Ref Use Iface
++        #  0.0.0.0      10.65.0.1  0.0.0.0  UG    0      0   0   eth0
++            routes['ipv4'].append({
++                'destination': toks[0],
++                'gateway': toks[1],
++                'genmask': toks[2],
++                'flags': toks[3],
++                'metric': toks[4],
++                'ref': toks[5],
++                'use': toks[6],
++                'iface': toks[7],
++            })
+     try:
+-        (route_out6, _err6) = util.subp(["netstat", "-A", "inet6", "-n"])
++        if platform.system() == "FreeBSD":
++            route_out, _ = util.subp(["netstat", "-rnf", "inet6"])
++            entries = [line for line in route_out.splitlines()[5:] if line]
++            for line in entries:
++                toks = line.split()
++
++        # FreeBSD "netstat -rnf inet6" shows routing table as:
++        #  Destination    Gateway     Flags      Netif Expire
++        #  fe80::/64      ::          U          eth0
++
++                routes['ipv6'].append({
++                    'destination': toks[0],
++                    'gateway': toks[1],
++                    'flags': toks[2],
++                    'iface': toks[3],
++                })
++
++        if platform.system() == "Linux":
++            route_out, _ = util.subp(["netstat", "-rnA", "inet6"])
++            entries = [line for line in route_out.splitlines()[3:] if line]
++            for line in entries:
++                toks = line.split()
++
++        # FreeBSD "netstat -rnA inet6" shows routing table as:
++        #  Destination   Next Hop   Flag Met Ref Use If
++        #  fe80::/64     ::         U    256 0   0   eth0
++
++                routes['ipv6'].append({
++                    'destination': toks[0],
++                    'gateway': toks[1],
++                    'flags': toks[2],
++                    'iface': toks[6],
++                })
+     except util.ProcessExecutionError:
++        # In case system doesn't have IPv6 support
+         pass
+-    else:
+-        entries6 = route_out6.splitlines()[1:]
+-        for line in entries6:
+-            if not line:
+-                continue
+-            toks = line.split()
+-            if (len(toks) < 6 or toks[0] == "Kernel" or
+-                    toks[0] == "Proto" or toks[0] == "Active"):
+-                continue
+-            entry = {
+-                'proto': toks[0],
+-                'recv-q': toks[1],
+-                'send-q': toks[2],
+-                'local address': toks[3],
+-                'foreign address': toks[4],
+-                'state': toks[5],
+-            }
+-            routes['ipv6'].append(entry)
++
+     return routes
+ 
+ 
+@@ -215,15 +236,14 @@
+             header = util.center("Route IPv4 info", "+", max_len)
+             lines.extend([header, route_s])
+         if routes.get('ipv6'):
+-            fields_v6 = ['Route', 'Proto', 'Recv-Q', 'Send-Q',
+-                         'Local Address', 'Foreign Address', 'State']
++            fields_v6 = ['Route', 'Destination', 'Gateway',
++                         'Interface', 'Flags']
+             tbl_v6 = PrettyTable(fields_v6)
+             for (n, r) in enumerate(routes.get('ipv6')):
+                 route_id = str(n)
+-                tbl_v6.add_row([route_id, r['proto'],
+-                                r['recv-q'], r['send-q'],
+-                                r['local address'], r['foreign address'],
+-                                r['state']])
++                tbl_v6.add_row([route_id, r['destination'],
++                                r['gateway'], r['iface'],
++                                r['flags']])
+             route_s = tbl_v6.get_string()
+             max_len = len(max(route_s.splitlines(), key=len))
+             header = util.center("Route IPv6 info", "+", max_len)
+diff -uNr cloud-init/trunk/cloudinit/settings.py /tmp/cloud_init_1035_patched/cloud-init/trunk/cloudinit/settings.py
+--- cloud-init/trunk/cloudinit/settings.py	2015-02-09 13:04:34.000000000 +0000
++++ /tmp/cloud_init_1035_patched/cloud-init/trunk/cloudinit/settings.py	2015-08-28 13:59:40.523526897 +0100
+@@ -35,13 +35,10 @@
+         'Azure',
+         'AltCloud',
+         'OVF',
+-        'MAAS',
+         'GCE',
+         'OpenStack',
+         'Ec2',
+-        'CloudSigma',
+         'CloudStack',
+-        'SmartOS',
+         # At the end to act as a 'catch' when none of the above work...
+         'None',
+     ],
+diff -uNr cloud-init/trunk/cloudinit/sources/DataSourceCloudSigma.py /tmp/cloud_init_1035_patched/cloud-init/trunk/cloudinit/sources/DataSourceCloudSigma.py
+--- cloud-init/trunk/cloudinit/sources/DataSourceCloudSigma.py	2015-02-09 13:04:34.000000000 +0000
++++ /tmp/cloud_init_1035_patched/cloud-init/trunk/cloudinit/sources/DataSourceCloudSigma.py	1970-01-01 01:00:00.000000000 +0100
+@@ -1,140 +0,0 @@
+-# vi: ts=4 expandtab
+-#
+-#    Copyright (C) 2014 CloudSigma
+-#
+-#    Author: Kiril Vladimiroff <kiril.vladimiroff@cloudsigma.com>
+-#
+-#    This program is free software: you can redistribute it and/or modify
+-#    it under the terms of the GNU General Public License version 3, as
+-#    published by the Free Software Foundation.
+-#
+-#    This program is distributed in the hope that it will be useful,
+-#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+-#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+-#    GNU General Public License for more details.
+-#
+-#    You should have received a copy of the GNU General Public License
+-#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+-from base64 import b64decode
+-import os
+-import re
+-
+-from cloudinit import log as logging
+-from cloudinit import sources
+-from cloudinit import util
+-from cloudinit.cs_utils import Cepko
+-
+-LOG = logging.getLogger(__name__)
+-
+-VALID_DSMODES = ("local", "net", "disabled")
+-
+-
+-class DataSourceCloudSigma(sources.DataSource):
+-    """
+-    Uses cepko in order to gather the server context from the VM.
+-
+-    For more information about CloudSigma's Server Context:
+-    http://cloudsigma-docs.readthedocs.org/en/latest/server_context.html
+-    """
+-    def __init__(self, sys_cfg, distro, paths):
+-        self.dsmode = 'local'
+-        self.cepko = Cepko()
+-        self.ssh_public_key = ''
+-        sources.DataSource.__init__(self, sys_cfg, distro, paths)
+-
+-    def is_running_in_cloudsigma(self):
+-        """
+-        Uses dmi data to detect if this instance of cloud-init is running
+-        in the CloudSigma's infrastructure.
+-        """
+-        uname_arch = os.uname()[4]
+-        if uname_arch.startswith("arm") or uname_arch == "aarch64":
+-            # Disabling because dmi data on ARM processors
+-            LOG.debug("Disabling CloudSigma datasource on arm (LP: #1243287)")
+-            return False
+-
+-        LOG.debug("determining hypervisor product name via dmi data")
+-        sys_product_name = util.read_dmi_data("system-product-name")
+-        if not sys_product_name:
+-            LOG.warn("failed to get hypervisor product name via dmi data")
+-            return False
+-        else:
+-            LOG.debug("detected hypervisor as {}".format(sys_product_name))
+-            return 'cloudsigma' in sys_product_name.lower()
+-
+-        LOG.warn("failed to query dmi data for system product name")
+-        return False
+-
+-    def get_data(self):
+-        """
+-        Metadata is the whole server context and /meta/cloud-config is used
+-        as userdata.
+-        """
+-        dsmode = None
+-        if not self.is_running_in_cloudsigma():
+-            return False
+-
+-        try:
+-            server_context = self.cepko.all().result
+-            server_meta = server_context['meta']
+-        except:
+-            # TODO: check for explicit "config on", and then warn
+-            # but since no explicit config is available now, just debug.
+-            LOG.debug("CloudSigma: Unable to read from serial port")
+-            return False
+-
+-        dsmode = server_meta.get('cloudinit-dsmode', self.dsmode)
+-        if dsmode not in VALID_DSMODES:
+-            LOG.warn("Invalid dsmode %s, assuming default of 'net'", dsmode)
+-            dsmode = 'net'
+-        if dsmode == "disabled" or dsmode != self.dsmode:
+-            return False
+-
+-        base64_fields = server_meta.get('base64_fields', '').split(',')
+-        self.userdata_raw = server_meta.get('cloudinit-user-data', "")
+-        if 'cloudinit-user-data' in base64_fields:
+-            self.userdata_raw = b64decode(self.userdata_raw)
+-        if 'cloudinit' in server_context.get('vendor_data', {}):
+-            self.vendordata_raw = server_context["vendor_data"]["cloudinit"]
+-
+-        self.metadata = server_context
+-        self.ssh_public_key = server_meta['ssh_public_key']
+-
+-        return True
+-
+-    def get_hostname(self, fqdn=False, resolve_ip=False):
+-        """
+-        Cleans up and uses the server's name if the latter is set. Otherwise
+-        the first part from uuid is being used.
+-        """
+-        if re.match(r'^[A-Za-z0-9 -_\.]+$', self.metadata['name']):
+-            return self.metadata['name'][:61]
+-        else:
+-            return self.metadata['uuid'].split('-')[0]
+-
+-    def get_public_ssh_keys(self):
+-        return [self.ssh_public_key]
+-
+-    def get_instance_id(self):
+-        return self.metadata['uuid']
+-
+-
+-class DataSourceCloudSigmaNet(DataSourceCloudSigma):
+-    def __init__(self, sys_cfg, distro, paths):
+-        DataSourceCloudSigma.__init__(self, sys_cfg, distro, paths)
+-        self.dsmode = 'net'
+-
+-
+-# Used to match classes to dependencies. Since this datasource uses the serial
+-# port network is not really required, so it's okay to load without it, too.
+-datasources = [
+-    (DataSourceCloudSigma, (sources.DEP_FILESYSTEM)),
+-    (DataSourceCloudSigmaNet, (sources.DEP_FILESYSTEM, sources.DEP_NETWORK)),
+-]
+-
+-
+-def get_datasource_list(depends):
+-    """
+-    Return a list of data sources that match this set of dependencies
+-    """
+-    return sources.list_from_depends(depends, datasources)
+diff -uNr cloud-init/trunk/cloudinit/sources/DataSourceMAAS.py /tmp/cloud_init_1035_patched/cloud-init/trunk/cloudinit/sources/DataSourceMAAS.py
+--- cloud-init/trunk/cloudinit/sources/DataSourceMAAS.py	2015-02-09 13:04:34.000000000 +0000
++++ /tmp/cloud_init_1035_patched/cloud-init/trunk/cloudinit/sources/DataSourceMAAS.py	1970-01-01 01:00:00.000000000 +0100
+@@ -1,402 +0,0 @@
+-# vi: ts=4 expandtab
+-#
+-#    Copyright (C) 2012 Canonical Ltd.
+-#    Copyright (C) 2012 Yahoo! Inc.
+-#
+-#    Author: Scott Moser <scott.moser@canonical.com>
+-#    Author: Joshua Harlow <harlowja@yahoo-inc.com>
+-#
+-#    This program is free software: you can redistribute it and/or modify
+-#    it under the terms of the GNU General Public License version 3, as
+-#    published by the Free Software Foundation.
+-#
+-#    This program is distributed in the hope that it will be useful,
+-#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+-#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+-#    GNU General Public License for more details.
+-#
+-#    You should have received a copy of the GNU General Public License
+-#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+-
+-from email.utils import parsedate
+-import errno
+-import oauth.oauth as oauth
+-import os
+-import time
+-import urllib2
+-
+-from cloudinit import log as logging
+-from cloudinit import sources
+-from cloudinit import url_helper
+-from cloudinit import util
+-
+-LOG = logging.getLogger(__name__)
+-MD_VERSION = "2012-03-01"
+-
+-
+-class DataSourceMAAS(sources.DataSource):
+-    """
+-    DataSourceMAAS reads instance information from MAAS.
+-    Given a config metadata_url, and oauth tokens, it expects to find
+-    files under the root named:
+-      instance-id
+-      user-data
+-      hostname
+-    """
+-    def __init__(self, sys_cfg, distro, paths):
+-        sources.DataSource.__init__(self, sys_cfg, distro, paths)
+-        self.base_url = None
+-        self.seed_dir = os.path.join(paths.seed_dir, 'maas')
+-        self.oauth_clockskew = None
+-
+-    def __str__(self):
+-        root = sources.DataSource.__str__(self)
+-        return "%s [%s]" % (root, self.base_url)
+-
+-    def get_data(self):
+-        mcfg = self.ds_cfg
+-
+-        try:
+-            (userdata, metadata) = read_maas_seed_dir(self.seed_dir)
+-            self.userdata_raw = userdata
+-            self.metadata = metadata
+-            self.base_url = self.seed_dir
+-            return True
+-        except MAASSeedDirNone:
+-            pass
+-        except MAASSeedDirMalformed as exc:
+-            LOG.warn("%s was malformed: %s" % (self.seed_dir, exc))
+-            raise
+-
+-        # If there is no metadata_url, then we're not configured
+-        url = mcfg.get('metadata_url', None)
+-        if not url:
+-            return False
+-
+-        try:
+-            if not self.wait_for_metadata_service(url):
+-                return False
+-
+-            self.base_url = url
+-
+-            (userdata, metadata) = read_maas_seed_url(self.base_url,
+-                                                      self._md_headers,
+-                                                      paths=self.paths)
+-            self.userdata_raw = userdata
+-            self.metadata = metadata
+-            return True
+-        except Exception:
+-            util.logexc(LOG, "Failed fetching metadata from url %s", url)
+-            return False
+-
+-    def _md_headers(self, url):
+-        mcfg = self.ds_cfg
+-
+-        # If we are missing token_key, token_secret or consumer_key
+-        # then just do non-authed requests
+-        for required in ('token_key', 'token_secret', 'consumer_key'):
+-            if required not in mcfg:
+-                return {}
+-
+-        consumer_secret = mcfg.get('consumer_secret', "")
+-
+-        timestamp = None
+-        if self.oauth_clockskew:
+-            timestamp = int(time.time()) + self.oauth_clockskew
+-
+-        return oauth_headers(url=url,
+-                             consumer_key=mcfg['consumer_key'],
+-                             token_key=mcfg['token_key'],
+-                             token_secret=mcfg['token_secret'],
+-                             consumer_secret=consumer_secret,
+-                             timestamp=timestamp)
+-
+-    def wait_for_metadata_service(self, url):
+-        mcfg = self.ds_cfg
+-
+-        max_wait = 120
+-        try:
+-            max_wait = int(mcfg.get("max_wait", max_wait))
+-        except Exception:
+-            util.logexc(LOG, "Failed to get max wait. using %s", max_wait)
+-
+-        if max_wait == 0:
+-            return False
+-
+-        timeout = 50
+-        try:
+-            if timeout in mcfg:
+-                timeout = int(mcfg.get("timeout", timeout))
+-        except Exception:
+-            LOG.warn("Failed to get timeout, using %s" % timeout)
+-
+-        starttime = time.time()
+-        check_url = "%s/%s/meta-data/instance-id" % (url, MD_VERSION)
+-        urls = [check_url]
+-        url = url_helper.wait_for_url(urls=urls, max_wait=max_wait,
+-                                      timeout=timeout,
+-                                      exception_cb=self._except_cb,
+-                                      headers_cb=self._md_headers)
+-
+-        if url:
+-            LOG.debug("Using metadata source: '%s'", url)
+-        else:
+-            LOG.critical("Giving up on md from %s after %i seconds",
+-                         urls, int(time.time() - starttime))
+-
+-        return bool(url)
+-
+-    def _except_cb(self, msg, exception):
+-        if not (isinstance(exception, url_helper.UrlError) and
+-                (exception.code == 403 or exception.code == 401)):
+-            return
+-
+-        if 'date' not in exception.headers:
+-            LOG.warn("Missing header 'date' in %s response", exception.code)
+-            return
+-
+-        date = exception.headers['date']
+-        try:
+-            ret_time = time.mktime(parsedate(date))
+-        except Exception as e:
+-            LOG.warn("Failed to convert datetime '%s': %s", date, e)
+-            return
+-
+-        self.oauth_clockskew = int(ret_time - time.time())
+-        LOG.warn("Setting oauth clockskew to %d", self.oauth_clockskew)
+-        return
+-
+-
+-def read_maas_seed_dir(seed_d):
+-    """
+-    Return user-data and metadata for a maas seed dir in seed_d.
+-    Expected format of seed_d are the following files:
+-      * instance-id
+-      * local-hostname
+-      * user-data
+-    """
+-    if not os.path.isdir(seed_d):
+-        raise MAASSeedDirNone("%s: not a directory")
+-
+-    files = ('local-hostname', 'instance-id', 'user-data', 'public-keys')
+-    md = {}
+-    for fname in files:
+-        try:
+-            md[fname] = util.load_file(os.path.join(seed_d, fname))
+-        except IOError as e:
+-            if e.errno != errno.ENOENT:
+-                raise
+-
+-    return check_seed_contents(md, seed_d)
+-
+-
+-def read_maas_seed_url(seed_url, header_cb=None, timeout=None,
+-                       version=MD_VERSION, paths=None):
+-    """
+-    Read the maas datasource at seed_url.
+-      - header_cb is a method that should return a headers dictionary for
+-        a given url
+-
+-    Expected format of seed_url is are the following files:
+-      * <seed_url>/<version>/meta-data/instance-id
+-      * <seed_url>/<version>/meta-data/local-hostname
+-      * <seed_url>/<version>/user-data
+-    """
+-    base_url = "%s/%s" % (seed_url, version)
+-    file_order = [
+-        'local-hostname',
+-        'instance-id',
+-        'public-keys',
+-        'user-data',
+-    ]
+-    files = {
+-        'local-hostname': "%s/%s" % (base_url, 'meta-data/local-hostname'),
+-        'instance-id': "%s/%s" % (base_url, 'meta-data/instance-id'),
+-        'public-keys': "%s/%s" % (base_url, 'meta-data/public-keys'),
+-        'user-data': "%s/%s" % (base_url, 'user-data'),
+-    }
+-    md = {}
+-    for name in file_order:
+-        url = files.get(name)
+-        if not header_cb:
+-            def _cb(url):
+-                return {}
+-            header_cb = _cb
+-
+-        if name == 'user-data':
+-            retries = 0
+-        else:
+-            retries = None
+-
+-        try:
+-            ssl_details = util.fetch_ssl_details(paths)
+-            resp = util.read_file_or_url(url, retries=retries,
+-                                         headers_cb=header_cb,
+-                                         timeout=timeout,
+-                                         ssl_details=ssl_details)
+-            if resp.ok():
+-                md[name] = str(resp)
+-            else:
+-                LOG.warn(("Fetching from %s resulted in"
+-                          " an invalid http code %s"), url, resp.code)
+-        except url_helper.UrlError as e:
+-            if e.code != 404:
+-                raise
+-    return check_seed_contents(md, seed_url)
+-
+-
+-def check_seed_contents(content, seed):
+-    """Validate if content is Is the content a dict that is valid as a
+-       return for a datasource.
+-       Either return a (userdata, metadata) tuple or
+-       Raise MAASSeedDirMalformed or MAASSeedDirNone
+-    """
+-    md_required = ('instance-id', 'local-hostname')
+-    if len(content) == 0:
+-        raise MAASSeedDirNone("%s: no data files found" % seed)
+-
+-    found = list(content.keys())
+-    missing = [k for k in md_required if k not in found]
+-    if len(missing):
+-        raise MAASSeedDirMalformed("%s: missing files %s" % (seed, missing))
+-
+-    userdata = content.get('user-data', "")
+-    md = {}
+-    for (key, val) in content.iteritems():
+-        if key == 'user-data':
+-            continue
+-        md[key] = val
+-
+-    return (userdata, md)
+-
+-
+-def oauth_headers(url, consumer_key, token_key, token_secret, consumer_secret,
+-                  timestamp=None):
+-    consumer = oauth.OAuthConsumer(consumer_key, consumer_secret)
+-    token = oauth.OAuthToken(token_key, token_secret)
+-
+-    if timestamp is None:
+-        ts = int(time.time())
+-    else:
+-        ts = timestamp
+-
+-    params = {
+-        'oauth_version': "1.0",
+-        'oauth_nonce': oauth.generate_nonce(),
+-        'oauth_timestamp': ts,
+-        'oauth_token': token.key,
+-        'oauth_consumer_key': consumer.key,
+-    }
+-    req = oauth.OAuthRequest(http_url=url, parameters=params)
+-    req.sign_request(oauth.OAuthSignatureMethod_PLAINTEXT(),
+-                     consumer, token)
+-    return req.to_header()
+-
+-
+-class MAASSeedDirNone(Exception):
+-    pass
+-
+-
+-class MAASSeedDirMalformed(Exception):
+-    pass
+-
+-
+-# Used to match classes to dependencies
+-datasources = [
+-  (DataSourceMAAS, (sources.DEP_FILESYSTEM, sources.DEP_NETWORK)),
+-]
+-
+-
+-# Return a list of data sources that match this set of dependencies
+-def get_datasource_list(depends):
+-    return sources.list_from_depends(depends, datasources)
+-
+-
+-if __name__ == "__main__":
+-    def main():
+-        """
+-        Call with single argument of directory or http or https url.
+-        If url is given additional arguments are allowed, which will be
+-        interpreted as consumer_key, token_key, token_secret, consumer_secret
+-        """
+-        import argparse
+-        import pprint
+-
+-        parser = argparse.ArgumentParser(description='Interact with MAAS DS')
+-        parser.add_argument("--config", metavar="file",
+-            help="specify DS config file", default=None)
+-        parser.add_argument("--ckey", metavar="key",
+-            help="the consumer key to auth with", default=None)
+-        parser.add_argument("--tkey", metavar="key",
+-            help="the token key to auth with", default=None)
+-        parser.add_argument("--csec", metavar="secret",
+-            help="the consumer secret (likely '')", default="")
+-        parser.add_argument("--tsec", metavar="secret",
+-            help="the token secret to auth with", default=None)
+-        parser.add_argument("--apiver", metavar="version",
+-            help="the apiver to use ("" can be used)", default=MD_VERSION)
+-
+-        subcmds = parser.add_subparsers(title="subcommands", dest="subcmd")
+-        subcmds.add_parser('crawl', help="crawl the datasource")
+-        subcmds.add_parser('get', help="do a single GET of provided url")
+-        subcmds.add_parser('check-seed', help="read andn verify seed at url")
+-
+-        parser.add_argument("url", help="the data source to query")
+-
+-        args = parser.parse_args()
+-
+-        creds = {'consumer_key': args.ckey, 'token_key': args.tkey,
+-            'token_secret': args.tsec, 'consumer_secret': args.csec}
+-
+-        if args.config:
+-            cfg = util.read_conf(args.config)
+-            if 'datasource' in cfg:
+-                cfg = cfg['datasource']['MAAS']
+-            for key in creds.keys():
+-                if key in cfg and creds[key] is None:
+-                    creds[key] = cfg[key]
+-
+-        def geturl(url, headers_cb):
+-            req = urllib2.Request(url, data=None, headers=headers_cb(url))
+-            return (urllib2.urlopen(req).read())
+-
+-        def printurl(url, headers_cb):
+-            print "== %s ==\n%s\n" % (url, geturl(url, headers_cb))
+-
+-        def crawl(url, headers_cb=None):
+-            if url.endswith("/"):
+-                for line in geturl(url, headers_cb).splitlines():
+-                    if line.endswith("/"):
+-                        crawl("%s%s" % (url, line), headers_cb)
+-                    else:
+-                        printurl("%s%s" % (url, line), headers_cb)
+-            else:
+-                printurl(url, headers_cb)
+-
+-        def my_headers(url):
+-            headers = {}
+-            if creds.get('consumer_key', None) is not None:
+-                headers = oauth_headers(url, **creds)
+-            return headers
+-
+-        if args.subcmd == "check-seed":
+-            if args.url.startswith("http"):
+-                (userdata, metadata) = read_maas_seed_url(args.url,
+-                                                          header_cb=my_headers,
+-                                                          version=args.apiver)
+-            else:
+-                (userdata, metadata) = read_maas_seed_url(args.url)
+-            print "=== userdata ==="
+-            print userdata
+-            print "=== metadata ==="
+-            pprint.pprint(metadata)
+-
+-        elif args.subcmd == "get":
+-            printurl(args.url, my_headers)
+-
+-        elif args.subcmd == "crawl":
+-            if not args.url.endswith("/"):
+-                args.url = "%s/" % args.url
+-            crawl(args.url, my_headers)
+-
+-    main()
+diff -uNr cloud-init/trunk/cloudinit/sources/DataSourceSmartOS.py /tmp/cloud_init_1035_patched/cloud-init/trunk/cloudinit/sources/DataSourceSmartOS.py
+--- cloud-init/trunk/cloudinit/sources/DataSourceSmartOS.py	2015-02-09 13:04:34.000000000 +0000
++++ /tmp/cloud_init_1035_patched/cloud-init/trunk/cloudinit/sources/DataSourceSmartOS.py	1970-01-01 01:00:00.000000000 +0100
+@@ -1,434 +0,0 @@
+-# vi: ts=4 expandtab
+-#
+-#    Copyright (C) 2013 Canonical Ltd.
+-#
+-#    Author: Ben Howard <ben.howard@canonical.com>
+-#
+-#    This program is free software: you can redistribute it and/or modify
+-#    it under the terms of the GNU General Public License version 3, as
+-#    published by the Free Software Foundation.
+-#
+-#    This program is distributed in the hope that it will be useful,
+-#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+-#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+-#    GNU General Public License for more details.
+-#
+-#    You should have received a copy of the GNU General Public License
+-#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+-#
+-#
+-#    Datasource for provisioning on SmartOS. This works on Joyent
+-#        and public/private Clouds using SmartOS.
+-#
+-#    SmartOS hosts use a serial console (/dev/ttyS1) on Linux Guests.
+-#        The meta-data is transmitted via key/value pairs made by
+-#        requests on the console. For example, to get the hostname, you
+-#        would send "GET hostname" on /dev/ttyS1.
+-#
+-#   Certain behavior is defined by the DataDictionary
+-#       http://us-east.manta.joyent.com/jmc/public/mdata/datadict.html
+-#       Comments with "@datadictionary" are snippets of the definition
+-
+-import base64
+-from cloudinit import log as logging
+-from cloudinit import sources
+-from cloudinit import util
+-import os
+-import os.path
+-import serial
+-
+-
+-LOG = logging.getLogger(__name__)
+-
+-SMARTOS_ATTRIB_MAP = {
+-    # Cloud-init Key : (SmartOS Key, Strip line endings)
+-    'local-hostname': ('hostname', True),
+-    'public-keys': ('root_authorized_keys', True),
+-    'user-script': ('user-script', False),
+-    'legacy-user-data': ('user-data', False),
+-    'user-data': ('cloud-init:user-data', False),
+-    'iptables_disable': ('iptables_disable', True),
+-    'motd_sys_info': ('motd_sys_info', True),
+-    'availability_zone': ('sdc:datacenter_name', True),
+-    'vendor-data': ('sdc:vendor-data', False),
+-    'operator-script': ('sdc:operator-script', False),
+-}
+-
+-DS_NAME = 'SmartOS'
+-DS_CFG_PATH = ['datasource', DS_NAME]
+-# BUILT-IN DATASOURCE CONFIGURATION
+-#  The following is the built-in configuration. If the values
+-#  are not set via the system configuration, then these default
+-#  will be used:
+-#    serial_device: which serial device to use for the meta-data
+-#    seed_timeout: how long to wait on the device
+-#    no_base64_decode: values which are not base64 encoded and
+-#            are fetched directly from SmartOS, not meta-data values
+-#    base64_keys: meta-data keys that are delivered in base64
+-#    base64_all: with the exclusion of no_base64_decode values,
+-#            treat all meta-data as base64 encoded
+-#    disk_setup: describes how to partition the ephemeral drive
+-#    fs_setup: describes how to format the ephemeral drive
+-#
+-BUILTIN_DS_CONFIG = {
+-    'serial_device': '/dev/ttyS1',
+-    'seed_timeout': 60,
+-    'no_base64_decode': ['root_authorized_keys',
+-                         'motd_sys_info',
+-                         'iptables_disable',
+-                         'user-data',
+-                         'user-script',
+-                         'sdc:datacenter_name',
+-                        ],
+-    'base64_keys': [],
+-    'base64_all': False,
+-    'disk_aliases': {'ephemeral0': '/dev/vdb'},
+-}
+-
+-BUILTIN_CLOUD_CONFIG = {
+-    'disk_setup': {
+-        'ephemeral0': {'table_type': 'mbr',
+-                       'layout': False,
+-                       'overwrite': False}
+-         },
+-    'fs_setup': [{'label': 'ephemeral0',
+-                  'filesystem': 'ext3',
+-                  'device': 'ephemeral0'}],
+-}
+-
+-# builtin vendor-data is a boothook that writes a script into
+-# /var/lib/cloud/scripts/per-boot.  *That* script then handles
+-# executing the 'operator-script' and 'user-script' files
+-# that cloud-init writes into /var/lib/cloud/instance/data/
+-# if they exist.
+-#
+-# This is all very indirect, but its done like this so that at
+-# some point in the future, perhaps cloud-init wouldn't do it at
+-# all, but rather the vendor actually provide vendor-data that accomplished
+-# their desires. (That is the point of vendor-data).
+-#
+-# cloud-init does cheat a bit, and write the operator-script and user-script
+-# itself.  It could have the vendor-script do that, but it seems better
+-# to not require the image to contain a tool (mdata-get) to read those
+-# keys when we have a perfectly good one inside cloud-init.
+-BUILTIN_VENDOR_DATA = """\
+-#cloud-boothook
+-#!/bin/sh
+-fname="%(per_boot_d)s/01_smartos_vendor_data.sh"
+-mkdir -p "${fname%%/*}"
+-cat > "$fname" <<"END_SCRIPT"
+-#!/bin/sh
+-##
+-# This file is written as part of the default vendor data for SmartOS.
+-# The SmartOS datasource writes the listed file from the listed metadata key
+-#   sdc:operator-script -> %(operator_script)s
+-#   user-script -> %(user_script)s
+-#
+-# You can view content with 'mdata-get <key>'
+-#
+-for script in "%(operator_script)s" "%(user_script)s"; do
+-    [ -x "$script" ] || continue
+-    echo "executing '$script'" 1>&2
+-    "$script"
+-done
+-END_SCRIPT
+-chmod +x "$fname"
+-"""
+-
+-
+-# @datadictionary: this is legacy path for placing files from metadata
+-#   per the SmartOS location. It is not preferable, but is done for
+-#   legacy reasons
+-LEGACY_USER_D = "/var/db"
+-
+-
+-class DataSourceSmartOS(sources.DataSource):
+-    def __init__(self, sys_cfg, distro, paths):
+-        sources.DataSource.__init__(self, sys_cfg, distro, paths)
+-        self.is_smartdc = None
+-
+-        self.ds_cfg = util.mergemanydict([
+-            self.ds_cfg,
+-            util.get_cfg_by_path(sys_cfg, DS_CFG_PATH, {}),
+-            BUILTIN_DS_CONFIG])
+-
+-        self.metadata = {}
+-        self.cfg = BUILTIN_CLOUD_CONFIG
+-
+-        self.seed = self.ds_cfg.get("serial_device")
+-        self.seed_timeout = self.ds_cfg.get("serial_timeout")
+-        self.smartos_no_base64 = self.ds_cfg.get('no_base64_decode')
+-        self.b64_keys = self.ds_cfg.get('base64_keys')
+-        self.b64_all = self.ds_cfg.get('base64_all')
+-        self.script_base_d = os.path.join(self.paths.get_cpath("scripts"))
+-
+-    def __str__(self):
+-        root = sources.DataSource.__str__(self)
+-        return "%s [seed=%s]" % (root, self.seed)
+-
+-    def get_data(self):
+-        md = {}
+-        ud = ""
+-
+-        if not device_exists(self.seed):
+-            LOG.debug("No serial device '%s' found for SmartOS datasource",
+-                      self.seed)
+-            return False
+-
+-        uname_arch = os.uname()[4]
+-        if uname_arch.startswith("arm") or uname_arch == "aarch64":
+-            # Disabling because dmidcode in dmi_data() crashes kvm process
+-            LOG.debug("Disabling SmartOS datasource on arm (LP: #1243287)")
+-            return False
+-
+-        dmi_info = dmi_data()
+-        if dmi_info is False:
+-            LOG.debug("No dmidata utility found")
+-            return False
+-
+-        system_uuid, system_type = tuple(dmi_info)
+-        if 'smartdc' not in system_type.lower():
+-            LOG.debug("Host is not on SmartOS. system_type=%s", system_type)
+-            return False
+-        self.is_smartdc = True
+-        md['instance-id'] = system_uuid
+-
+-        b64_keys = self.query('base64_keys', strip=True, b64=False)
+-        if b64_keys is not None:
+-            self.b64_keys = [k.strip() for k in str(b64_keys).split(',')]
+-
+-        b64_all = self.query('base64_all', strip=True, b64=False)
+-        if b64_all is not None:
+-            self.b64_all = util.is_true(b64_all)
+-
+-        for ci_noun, attribute in SMARTOS_ATTRIB_MAP.iteritems():
+-            smartos_noun, strip = attribute
+-            md[ci_noun] = self.query(smartos_noun, strip=strip)
+-
+-        # @datadictionary: This key may contain a program that is written
+-        # to a file in the filesystem of the guest on each boot and then
+-        # executed. It may be of any format that would be considered
+-        # executable in the guest instance.
+-        #
+-        # We write 'user-script' and 'operator-script' into the
+-        # instance/data directory. The default vendor-data then handles
+-        # executing them later.
+-        data_d = os.path.join(self.paths.get_cpath(), 'instances',
+-                              md['instance-id'], 'data')
+-        user_script = os.path.join(data_d, 'user-script')
+-        u_script_l = "%s/user-script" % LEGACY_USER_D
+-        write_boot_content(md.get('user-script'), content_f=user_script,
+-                           link=u_script_l, shebang=True, mode=0700)
+-
+-        operator_script = os.path.join(data_d, 'operator-script')
+-        write_boot_content(md.get('operator-script'),
+-                           content_f=operator_script, shebang=False, mode=0700)
+-
+-        # @datadictionary:  This key has no defined format, but its value
+-        # is written to the file /var/db/mdata-user-data on each boot prior
+-        # to the phase that runs user-script. This file is not to be executed.
+-        # This allows a configuration file of some kind to be injected into
+-        # the machine to be consumed by the user-script when it runs.
+-        u_data = md.get('legacy-user-data')
+-        u_data_f = "%s/mdata-user-data" % LEGACY_USER_D
+-        write_boot_content(u_data, u_data_f)
+-
+-        # Handle the cloud-init regular meta
+-        if not md['local-hostname']:
+-            md['local-hostname'] = system_uuid
+-
+-        ud = None
+-        if md['user-data']:
+-            ud = md['user-data']
+-
+-        if not md['vendor-data']:
+-            md['vendor-data'] = BUILTIN_VENDOR_DATA % {
+-                'user_script': user_script,
+-                'operator_script': operator_script,
+-                'per_boot_d': os.path.join(self.paths.get_cpath("scripts"),
+-                                           'per-boot'),
+-            }
+-
+-        self.metadata = util.mergemanydict([md, self.metadata])
+-        self.userdata_raw = ud
+-        self.vendordata_raw = md['vendor-data']
+-        return True
+-
+-    def device_name_to_device(self, name):
+-        return self.ds_cfg['disk_aliases'].get(name)
+-
+-    def get_config_obj(self):
+-        return self.cfg
+-
+-    def get_instance_id(self):
+-        return self.metadata['instance-id']
+-
+-    def query(self, noun, strip=False, default=None, b64=None):
+-        if b64 is None:
+-            if noun in self.smartos_no_base64:
+-                b64 = False
+-            elif self.b64_all or noun in self.b64_keys:
+-                b64 = True
+-
+-        return query_data(noun=noun, strip=strip, seed_device=self.seed,
+-                          seed_timeout=self.seed_timeout, default=default,
+-                          b64=b64)
+-
+-
+-def device_exists(device):
+-    """Symplistic method to determine if the device exists or not"""
+-    return os.path.exists(device)
+-
+-
+-def get_serial(seed_device, seed_timeout):
+-    """This is replaced in unit testing, allowing us to replace
+-        serial.Serial with a mocked class.
+-
+-        The timeout value of 60 seconds should never be hit. The value
+-        is taken from SmartOS own provisioning tools. Since we are reading
+-        each line individually up until the single ".", the transfer is
+-        usually very fast (i.e. microseconds) to get the response.
+-    """
+-    if not seed_device:
+-        raise AttributeError("seed_device value is not set")
+-
+-    ser = serial.Serial(seed_device, timeout=seed_timeout)
+-    if not ser.isOpen():
+-        raise SystemError("Unable to open %s" % seed_device)
+-
+-    return ser
+-
+-
+-def query_data(noun, seed_device, seed_timeout, strip=False, default=None,
+-               b64=None):
+-    """Makes a request to via the serial console via "GET <NOUN>"
+-
+-        In the response, the first line is the status, while subsequent lines
+-        are is the value. A blank line with a "." is used to indicate end of
+-        response.
+-
+-        If the response is expected to be base64 encoded, then set b64encoded
+-        to true. Unfortantely, there is no way to know if something is 100%
+-        encoded, so this method relies on being told if the data is base64 or
+-        not.
+-    """
+-
+-    if not noun:
+-        return False
+-
+-    ser = get_serial(seed_device, seed_timeout)
+-    ser.write("GET %s\n" % noun.rstrip())
+-    status = str(ser.readline()).rstrip()
+-    response = []
+-    eom_found = False
+-
+-    if 'SUCCESS' not in status:
+-        ser.close()
+-        return default
+-
+-    while not eom_found:
+-        m = ser.readline()
+-        if m.rstrip() == ".":
+-            eom_found = True
+-        else:
+-            response.append(m)
+-
+-    ser.close()
+-
+-    if b64 is None:
+-        b64 = query_data('b64-%s' % noun, seed_device=seed_device,
+-                            seed_timeout=seed_timeout, b64=False,
+-                            default=False, strip=True)
+-        b64 = util.is_true(b64)
+-
+-    resp = None
+-    if b64 or strip:
+-        resp = "".join(response).rstrip()
+-    else:
+-        resp = "".join(response)
+-
+-    if b64:
+-        try:
+-            return base64.b64decode(resp)
+-        except TypeError:
+-            LOG.warn("Failed base64 decoding key '%s'", noun)
+-            return resp
+-
+-    return resp
+-
+-
+-def dmi_data():
+-    sys_uuid = util.read_dmi_data("system-uuid")
+-    sys_type = util.read_dmi_data("system-product-name")
+-
+-    if not sys_uuid or not sys_type:
+-        return None
+-
+-    return (sys_uuid.lower(), sys_type)
+-
+-
+-def write_boot_content(content, content_f, link=None, shebang=False,
+-                       mode=0400):
+-    """
+-    Write the content to content_f. Under the following rules:
+-        1. If no content, remove the file
+-        2. Write the content
+-        3. If executable and no file magic, add it
+-        4. If there is a link, create it
+-
+-    @param content: what to write
+-    @param content_f: the file name
+-    @param backup_d: the directory to save the backup at
+-    @param link: if defined, location to create a symlink to
+-    @param shebang: if no file magic, set shebang
+-    @param mode: file mode
+-
+-    Becuase of the way that Cloud-init executes scripts (no shell),
+-    a script will fail to execute if does not have a magic bit (shebang) set
+-    for the file. If shebang=True, then the script will be checked for a magic
+-    bit and to the SmartOS default of assuming that bash.
+-    """
+-
+-    if not content and os.path.exists(content_f):
+-        os.unlink(content_f)
+-    if link and os.path.islink(link):
+-        os.unlink(link)
+-    if not content:
+-        return
+-
+-    util.write_file(content_f, content, mode=mode)
+-
+-    if shebang and not content.startswith("#!"):
+-        try:
+-            cmd = ["file", "--brief", "--mime-type", content_f]
+-            (f_type, _err) = util.subp(cmd)
+-            LOG.debug("script %s mime type is %s", content_f, f_type)
+-            if f_type.strip() == "text/plain":
+-                new_content = "\n".join(["#!/bin/bash", content])
+-                util.write_file(content_f, new_content, mode=mode)
+-                LOG.debug("added shebang to file %s", content_f)
+-
+-        except Exception as e:
+-            util.logexc(LOG, ("Failed to identify script type for %s" %
+-                             content_f, e))
+-
+-    if link:
+-        try:
+-            if os.path.islink(link):
+-                os.unlink(link)
+-            if content and os.path.exists(content_f):
+-                util.ensure_dir(os.path.dirname(link))
+-                os.symlink(content_f, link)
+-        except IOError as e:
+-            util.logexc(LOG, "failed establishing content link", e)
+-
+-
+-# Used to match classes to dependencies
+-datasources = [
+-    (DataSourceSmartOS, (sources.DEP_FILESYSTEM, sources.DEP_NETWORK)),
+-]
+-
+-
+-# Return a list of data sources that match this set of dependencies
+-def get_datasource_list(depends):
+-    return sources.list_from_depends(depends, datasources)
+diff -uNr cloud-init/trunk/packages/brpm /tmp/cloud_init_1035_patched/cloud-init/trunk/packages/brpm
+--- cloud-init/trunk/packages/brpm	2015-02-09 13:04:34.000000000 +0000
++++ /tmp/cloud_init_1035_patched/cloud-init/trunk/packages/brpm	2015-08-27 10:40:06.306948391 +0100
+@@ -37,12 +37,8 @@
+     'redhat': {
+         'argparse': 'python-argparse',
+         'cheetah': 'python-cheetah',
+-        'jinja2': 'python-jinja2',
+         'configobj': 'python-configobj',
+-        'jsonpatch': 'python-jsonpatch',
+-        'oauth': 'python-oauth',
+         'prettytable': 'python-prettytable',
+-        'pyserial': 'pyserial',
+         'pyyaml': 'PyYAML',
+         'requests': 'python-requests',
+     },
+diff -uNr cloud-init/trunk/requirements.txt /tmp/cloud_init_1035_patched/cloud-init/trunk/requirements.txt
+--- cloud-init/trunk/requirements.txt	2015-02-09 13:04:34.000000000 +0000
++++ /tmp/cloud_init_1035_patched/cloud-init/trunk/requirements.txt	2015-08-27 10:39:05.700274952 +0100
+@@ -2,18 +2,15 @@
+ 
+ # Used for untemplating any files or strings with parameters.
+ cheetah
+-jinja2
+ 
+ # This is used for any pretty printing of tabular data.
+ PrettyTable
+ 
+ # This one is currently only used by the MAAS datasource. If that
+ # datasource is removed, this is no longer needed
+-oauth
+ 
+ # This one is currently used only by the CloudSigma and SmartOS datasources.
+ # If these datasources are removed, this is no longer needed
+-pyserial
+ 
+ # This is only needed for places where we need to support configs in a manner
+ # that the built-in config parser is not sufficent (ie
+@@ -31,4 +28,3 @@
+ requests
+ 
+ # For patching pieces of cloud-config together
+-jsonpatch
